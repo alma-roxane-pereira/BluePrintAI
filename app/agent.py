@@ -19,6 +19,7 @@ class AgentState(TypedDict):
     pivot_suggestion: dict
     assumption_checklist: dict
     evidence_confidence: dict
+    geographic_bias: dict
     
     
 
@@ -70,8 +71,31 @@ def compute_confidence(results: list[str]) -> str:
     else:
         return "Insufficient"
     
-    
+US_SIGNALS = [
+     "us", "usa", "united states", "american", "america",
+    "silicon valley", "y combinator", "techcrunch", "san francisco"
+]
 
+def detect_geographic_bias(results: list[str])-> str:
+    """Checks what fraction of results contain US-specific signals.If 50%+ are US-centric,raises a warning"""
+    
+    non_empty = [r for r in results if r.strip()]
+    if not non_empty:
+        return "Insufficient data to detect bias"
+    
+    us_hit_count = sum(
+        1 for r in non_empty
+        if any(signal in r.lower() for signal in US_SIGNALS)
+        
+    )
+    
+    ratio = us_hit_count/len(non_empty)
+    
+    if ratio>=0.5:
+        return "Warning:Results may  be US-centric"
+    else:
+        return "No significant geographic bias detected"
+    
 def competitor_finder(state: AgentState) -> dict:
     idea = state["idea_cleaned"].get("cleaned_idea", state["idea"])
     query = f"existing startups or products that do: {idea}"
@@ -79,8 +103,10 @@ def competitor_finder(state: AgentState) -> dict:
     competitors = results.split("\n")
     
     confidence = compute_confidence(competitors)
+    bias = detect_geographic_bias(competitors)
     return {"competitors": competitors,
-            "evidence_confidence":{"competitors":confidence}
+            "evidence_confidence":{"competitors":confidence},
+            "geographic_bias":{"competitors":bias}
             }
 
 
@@ -91,12 +117,14 @@ def pain_point_miner(state: AgentState) -> dict:
     pain_points = results.split("\n")
     
     confidence = compute_confidence(pain_points)
-    existing = state.get("evidence_confidence", {})      
-    updated_confidence = {**existing, "pain_points": confidence} 
+    bias = detect_geographic_bias(pain_points)
+    existing_confidence = state.get("evidence_confidence", {}) 
+    existing_bias=state.get("geographic_bias",{})     
     return {
         "pain_points": pain_points,
-            "evidence_confidence":updated_confidence
-        }
+             "evidence_confidence": {**existing_confidence, "pain_points": confidence},
+        "geographic_bias": {**existing_bias, "pain_points": bias}  # ← NEW
+    }
 
 def execution_risk_agent(state: AgentState) -> dict:
     idea = state["idea_cleaned"].get("cleaned_idea", state["idea"])
@@ -348,7 +376,8 @@ if __name__ == "__main__":
         "execution_risk": {},
         "pivot_suggestion":{},
         "assumption_checklist": {},
-        "evidence_confidence": {    }
+        "evidence_confidence": {},
+        "geographic_bias":{}
     })
     print("\n--- SCORECARD ---")
     for key, value in result["scorecard"].items():
