@@ -19,6 +19,8 @@ class AgentState(TypedDict):
     pivot_suggestion: dict
     assumption_checklist: dict
     evidence_confidence: dict
+    geographic_bias: dict
+    score_explainability: dict
     
     
 
@@ -70,8 +72,31 @@ def compute_confidence(results: list[str]) -> str:
     else:
         return "Insufficient"
     
-    
+US_SIGNALS = [
+     "us", "usa", "united states", "american", "america",
+    "silicon valley", "y combinator", "techcrunch", "san francisco"
+]
 
+def detect_geographic_bias(results: list[str])-> str:
+    """Checks what fraction of results contain US-specific signals.If 50%+ are US-centric,raises a warning"""
+    
+    non_empty = [r for r in results if r.strip()]
+    if not non_empty:
+        return "Insufficient data to detect bias"
+    
+    us_hit_count = sum(
+        1 for r in non_empty
+        if any(signal in r.lower() for signal in US_SIGNALS)
+        
+    )
+    
+    ratio = us_hit_count/len(non_empty)
+    
+    if ratio>=0.5:
+        return "Warning:Results may  be US-centric"
+    else:
+        return "No significant geographic bias detected"
+    
 def competitor_finder(state: AgentState) -> dict:
     idea = state["idea_cleaned"].get("cleaned_idea", state["idea"])
     query = f"existing startups or products that do: {idea}"
@@ -79,8 +104,10 @@ def competitor_finder(state: AgentState) -> dict:
     competitors = results.split("\n")
     
     confidence = compute_confidence(competitors)
+    bias = detect_geographic_bias(competitors)
     return {"competitors": competitors,
-            "evidence_confidence":{"competitors":confidence}
+            "evidence_confidence":{"competitors":confidence},
+            "geographic_bias":{"competitors":bias}
             }
 
 
@@ -91,12 +118,14 @@ def pain_point_miner(state: AgentState) -> dict:
     pain_points = results.split("\n")
     
     confidence = compute_confidence(pain_points)
-    existing = state.get("evidence_confidence", {})      
-    updated_confidence = {**existing, "pain_points": confidence} 
+    bias = detect_geographic_bias(pain_points)
+    existing_confidence = state.get("evidence_confidence", {}) 
+    existing_bias=state.get("geographic_bias",{})     
     return {
         "pain_points": pain_points,
-            "evidence_confidence":updated_confidence
-        }
+             "evidence_confidence": {**existing_confidence, "pain_points": confidence},
+        "geographic_bias": {**existing_bias, "pain_points": bias}  # ← NEW
+    }
 
 def execution_risk_agent(state: AgentState) -> dict:
     idea = state["idea_cleaned"].get("cleaned_idea", state["idea"])
@@ -142,14 +171,57 @@ Nothing else. Just JSON.
     
     execution_risk = json.loads(raw)
     return {"execution_risk": execution_risk}                   
+def build_explainability(state: AgentState, scorecard: dict) -> dict:
+    """
+    Maps each score back to the evidence sources that drove it.
+    Picks top 3 non-empty items from each source list.
+    """
+    competitors = [c for c in state.get("competitors", []) if c.strip()][:3]
+    pain_points = [p for p in state.get("pain_points", []) if p.strip()][:3]
+    confidence  = state.get("evidence_confidence", {})
+    bias        = state.get("geographic_bias", {})
 
+    return {
+        "competition_score": {
+            "score": scorecard.get("competition_score"),
+            "driven_by": competitors,
+            "evidence_confidence": confidence.get("competitors", "Unknown"),
+            "geographic_bias": bias.get("competitors", "Unknown")
+        },
+         "market_score": {
+            "score": scorecard.get("market_score"),
+            "driven_by": pain_points,
+            "evidence_confidence": confidence.get("pain_points", "Unknown"),
+            "geographic_bias": bias.get("pain_points", "Unknown")
+        },
+        "retention_score": {
+            "score": scorecard.get("retention_score"),
+            "driven_by": competitors + pain_points,
+            "note": "Based on combined competitor and demand signals"
+        },
+        "willingness_to_pay_score": {
+            "score": scorecard.get("willingness_to_pay_score"),
+            "driven_by": pain_points,
+            "evidence_confidence": confidence.get("pain_points", "Unknown")
+        },
+        "defensibility_score": {
+            "score": scorecard.get("defensibility_score"),
+            "driven_by": competitors,
+            "evidence_confidence": confidence.get("competitors", "Unknown")
+        },
+         "legal_score": {
+            "score": scorecard.get("legal_score"),
+            "driven_by": [],
+            "note": "Based on LLM reasoning — no direct source available"
+        }
+    }
+    
 def aggregator(state: AgentState) -> dict:
     idea = state["idea"]
     competitors = "\n".join(state["competitors"])
     pain_points = "\n".join(state["pain_points"])
 
     llm = ChatGroq(model="llama-3.1-8b-instant")
-
 
     prompt = f"""
 You are a cynical venture capital analyst who has seen 10,000 startup pitches fail.
@@ -166,7 +238,6 @@ Competitors found:
 
 Evidence of pain/demand:
 {pain_points}
-
 Score each dimension 1-10 where 10 = extremely risky/bad:
 
 1. competition_score: How saturated is this market? Are there well-funded incumbents?
@@ -188,7 +259,7 @@ willingness_to_pay_score, defensibility_score, overall_score,
 verdict, one_line_summary, top_risk
 
 Nothing else. No explanation. Just JSON.
-"""    
+"""
     response = llm.invoke(prompt)
     raw = response.content.strip()
     if raw.startswith("```"):
@@ -197,7 +268,12 @@ Nothing else. No explanation. Just JSON.
             raw = raw[4:]
     raw = raw.strip()
     scorecard = json.loads(raw)
-    return {"scorecard": scorecard}
+    explainability = build_explainability(state, scorecard)   # ← NEW
+
+    return {
+        "scorecard": scorecard,
+        "score_explainability": explainability                # ← NEW
+    }
 
 def pivot_suggester(state: AgentState) -> dict:
     idea = state["idea"]
@@ -348,7 +424,9 @@ if __name__ == "__main__":
         "execution_risk": {},
         "pivot_suggestion":{},
         "assumption_checklist": {},
-        "evidence_confidence": {    }
+        "evidence_confidence": {},
+        "geographic_bias":{},
+        "score_explainability": {}
     })
     print("\n--- SCORECARD ---")
     for key, value in result["scorecard"].items():
@@ -368,3 +446,5 @@ if __name__ == "__main__":
         print(f"Experiment: {item['experiment']}")
         print(f"Pass: {item['pass_signal']}")
         print(f"Fail: {item['fail_signal']}")
+        
+    print()
