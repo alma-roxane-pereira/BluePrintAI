@@ -397,3 +397,5 @@ if __name__ == "__main__":
         print(f"Experiment: {item['experiment']}")
         print(f"Pass: {item['pass_signal']}")
         print(f"Fail: {item['fail_signal']}")
+        
+    print()
